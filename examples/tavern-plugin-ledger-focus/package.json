@@ -1,0 +1,8 @@
+{
+  "name": "dsh-tavern-ledger-focus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "按剧情筛选手动台账整理上下文，支持原文依据补查与范围检查",
+  "exports": { ".": "./index.mjs" }
+}
