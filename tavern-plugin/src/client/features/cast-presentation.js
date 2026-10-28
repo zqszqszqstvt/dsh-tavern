@@ -140,6 +140,8 @@
 					props.children));
 		}
 
+		// 外观 → 正文排版：模型整块写下来的正文先按句子重新分段（features/prose-layout.js）；
+		// 台词行（@…）不参与，它们是气泡，本身就是一段。
 		/**
 		 * Text with its dialogue bubbles as speaker rows, while it streams too: a bubble is its speaker's row as soon as its
 		 * text starts (an unfinished thought has no closing bracket yet), and a last line still too short to read shows
@@ -147,11 +149,12 @@
 		 */
 		function renderTavernDialogueText(text, key, renderText, cast, streaming) {
 			const h = React.createElement;
-			const segments = cast && String(text || "").indexOf("@") >= 0 ? parseDialogueBubbles(text, streaming) : null;
-			if (!segments || !segments.some(function (segment) { return segment.kind === "bubble"; })) return renderText(dialogueBubblePlainText(text, streaming), key);
+			const source = String(text ?? ""), segments = source.indexOf("@") >= 0 ? parseBubbles(source, streaming) : null;
+			if (!cast || !segments || !segments.some(function (segment) { return segment.kind === "bubble"; })) return renderText(layoutTavernProseText(segments ? dialogueBubblePlainText(segments) : source), key);
 			return h(React.Fragment, { key: key }, segments.map(function (segment, index) {
-				if (segment.kind === "markdown") return renderText(segment.text, index);
-				return h(TavernCastRow, { key: index, cast: cast, speaker: segment.speaker, emotion: segment.emotion, speech: segment.streaming ? "" : segment.text },
+				if (segment.kind === "markdown") return renderText(layoutTavernProseText(segment.text), index);
+				const speaker = bubbleSpeaker(segment), character = tavernCastCharacter(cast.characters, speaker);
+				return h(TavernCastRow, { key: index, cast: cast, speaker: speaker, emotion: bubbleEmotion(segment.mood), speech: bubbleSpeech(segment, voiceTranslates(character && character.voiceLanguage)) },
 					renderText(segment.thought ? "（" + segment.text + (segment.streaming ? "" : "）") : segment.text, "text"));
 			}));
 		}
@@ -228,7 +231,8 @@
 						h("span", { className: "dsh-tavern-cast-manager-name" }, name, h("small", null, count ? count + " 张立绘" : "暂无立绘")),
 						h(TavernCastVoiceField, { sessionId: props.sessionId, name: name, character: character, busy: busy,
 							onSave: function (provider, voice) { void run("castSetVoice", { name: name, provider: provider, voice: voice }, function () { return voice ? "已保存 " + name + " 的声音" : "已清除 " + name + " 的声音"; }); },
-							onSource: function (provider, clone) { void run("castSetVoiceSource", { name: name, provider: provider, clone: clone }, function () { return "已保存 " + name + " 的配音来源"; }); } }),
+							onSource: function (provider, clone) { void run("castSetVoiceSource", { name: name, provider: provider, clone: clone }, function () { return "已保存 " + name + " 的配音来源"; }); },
+							onLanguage: function (language) { void run("castSetVoiceLanguage", { name: name, language: language }, function () { return "已保存 " + name + " 的配音语言"; }); } }),
 						h("button", { type: "button", disabled: busy, onClick: function () { upload(name, "avatar"); } }, "换头像"),
 						h("button", { type: "button", disabled: busy, onClick: function () { upload(name, emotion); } }, "加" + TAVERN_CAST_EMOTIONS[emotion] + "立绘"),
 						character && !character.plugin ? h("button", { type: "button", disabled: busy, onClick: function () { void run("castRemoveCharacter", { name: character.name }, function () { return "已清除 " + character.name + " 的素材"; }); } }, "清除") : null,

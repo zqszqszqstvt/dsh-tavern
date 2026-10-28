@@ -116,8 +116,8 @@ test('provider APIs：capabilities、克隆输入、卡绑定筛选与 Cordis �
     } })
   } })
   await tick()
-  assert.equal(tavern.apiVersion, 4)
-  assert.deepEqual(tavern.capabilities, { mvuSettlementProvider: 1 })
+  assert.equal(tavern.apiVersion, 6)
+  assert.deepEqual(tavern.capabilities, { mvuSettlementProvider: 1, worldbookStrategy: 1 })
   assert.equal(Object.isFrozen(tavern.capabilities), true)
   assert.equal(tavern.mvuProviderRegistered, undefined, 'registration guard is internal, not a plugin service method')
   assert.equal(h.api.mvuProviderRegistered('card-provider'), true)
@@ -970,7 +970,7 @@ test('版本失效信号：versionSignal 在正文版本被替换或删局时中
     ctx.tavern.onTimelineChanged(change => seen.push(change))
   } })
   await tick()
-  assert.equal(tavern.apiVersion, 4)
+  assert.equal(tavern.apiVersion, 6)
   assert.equal((await tavern.versionSignal({ gameId: 'game-1', turn: 3, textVersion: 'old' })).aborted, true, '不是当前版本时立即中止')
   const signal = await tavern.versionSignal({ gameId: 'game-1', turn: 3, textVersion: 'key-3' })
   h.api.timelineChanged('game-1', { kind: 'edit', turn: 3 })
@@ -1196,4 +1196,66 @@ test('插件联网声明随卸载释放，不能覆盖原生工具或重复声�
   await fiber.dispose()
   await tick()
   assert.equal(h.api.toolNetworkFor('reference_lookup'), undefined)
+})
+
+// #394 附带：配图插件的生成记录要和对话里的图同进同退。
+test('玩家删图只通知图的主人，带上被删每张图的插件数据；插件自己按版本删不触发', { skip: !cordis }, async t => {
+  const { createPluginMediaViews } = await import('../tavern-plugin/lib/domain/plugin-media-views.js')
+  const h = await harness(t)
+  const views = createPluginMediaViews({ pluginMedia: h.media, sessionSignals: { publish() {} }, attachments: () => null, mediaRemoved: h.api.mediaRemoved,
+    pluginTurns: { resolveGame: async sessionId => sessionId === 'game-1' ? { chatId: 'chat-1', sessionId } : null, currentKey: async () => 'key-3' } })
+  const heard = { mine: [], other: [] }
+  let tavern
+  await h.root.plugin({ name: 'image-plugin', inject: ['tavern'], apply(ctx) { tavern = ctx.tavern; ctx.tavern.onMediaRemoved(event => heard.mine.push(event)) } })
+  await h.root.plugin({ name: 'other-plugin', inject: ['tavern'], apply(ctx) { ctx.tavern.onMediaRemoved(event => heard.other.push(event)) } })
+  await tick()
+  const draw = async jobs => {
+    const { id } = await tavern.attach({ gameId: 'game-1', turn: 3, textVersion: 'key-3', item: { kind: 'image', attachment: { ...image, attachmentId: jobs[0] }, data: { jobId: jobs[0] } } })
+    for (const job of jobs.slice(1)) await tavern.update(id, { attachment: { ...image, attachmentId: job }, data: { jobId: job } })
+    return id
+  }
+  const first = await draw(['j1', 'j2', 'j3'])
+  await views.removePluginMediaVersion('game-1', first, 0)
+  await views.removePluginMediaVersion('game-1', first, null)
+  await tick()
+  assert.deepEqual(heard.mine.map(event => [event.itemRemoved, event.pictures.map(picture => picture.data.jobId)]), [[false, ['j1']], [false, ['j3']]])
+  assert.equal((await tavern.list({ gameId: 'game-1' }))[0].data.jobId, 'j2', '上一版顶上时带回它的数据')
+  await views.removePluginGalleryItems('game-1', [first])
+  await tick()
+  assert.deepEqual(heard.mine.at(-1), { gameId: 'game-1', itemId: first, kind: 'image', turn: 3, textVersion: 'key-3', itemRemoved: true,
+    pictures: [{ caption: '', prompt: '', createdAt: heard.mine.at(-1).pictures[0].createdAt, data: { jobId: 'j2' } }] })
+
+  const second = await draw(['k1', 'k2'])
+  assert.equal(await tavern.remove(second, { version: 0 }), true)
+  assert.equal(await tavern.remove(second, { version: 'current' }), true)
+  assert.deepEqual(await tavern.list({ gameId: 'game-1' }), [], '最后一张删掉整项')
+  await tick()
+  assert.equal(heard.mine.length, 3, '插件自己删不再通知自己')
+  assert.deepEqual(heard.other, [], '别的插件听不到')
+})
+
+test('台账整理替换：交回的增量先过校验；不合格、出错或放弃时退回 Tavern 自己整理；停止后台时中止', { skip: !cordis }, async t => {
+  const h = await harness(t)
+  let mode = 'ok', seen
+  await h.root.plugin({ name: 'ledger-plugin', inject: ['tavern'], apply(ctx) {
+    ctx.tavern.replaceLedger({ async consolidate(input) {
+      seen = input
+      if (mode === 'throw') throw new Error('炸了')
+      if (mode === 'decline') return null
+      if (mode === 'wait') return await new Promise((_, reject) => input.signal.addEventListener('abort', () => reject(input.signal.reason)))
+      return { delta: mode === 'bad' ? { npcs: { update: [{ name: '无名' }] } } : { items: { add: [{ name: '钥匙', qty: 1 }] } } }
+    } })
+  } })
+  await tick()
+  const input = { gameId: 'game-1', from: 1, through: 2, text: '正文', ledger: { items: [] }, rules: '规则', tool: { name: 'ledger_submit' },
+    apply: delta => { if (delta.npcs) throw new Error('不能更新尚未登记的条目：无名') } }
+  assert.deepEqual(await h.api.replaceLedger(input), { owner: 'ledger-plugin', delta: { items: { add: [{ name: '钥匙', qty: 1 }] } } })
+  assert.deepEqual([seen.from, seen.through, seen.text, seen.rules, seen.tool.name, typeof seen.apply], [1, 2, '正文', '规则', 'ledger_submit', 'undefined'], '插件拿不到 apply')
+  for (mode of ['bad', 'throw', 'decline']) assert.equal(await h.api.replaceLedger(input), null, mode)
+  assert.deepEqual(h.errors().map(error => error.message), ['炸了', '不能更新尚未登记的条目：无名'])
+  mode = 'wait'
+  const running = h.api.replaceLedger(input)
+  await tick()
+  assert.equal(h.api.stopTasks('game-1'), true)
+  await assert.rejects(running, /停止了台账整理/)
 })
