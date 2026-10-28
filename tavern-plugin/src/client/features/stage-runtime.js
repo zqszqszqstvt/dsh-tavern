@@ -274,7 +274,9 @@ function playTavernStagePerformance(root, event, id, skin) {
 }
 
 // 音效 (modules/stage-sfx.js): one page-wide one-shot player on the page's AudioContext, shared with the BGM transport.
+// While one sounds, the layers below it dip (避让, features/stage-audio.js).
 const tavernStageSfx = createStageSfx({ context: () => tavernStageAudio.context(), fetch: (url, init) => window.fetch(url, init), output: ctx => tavernStageAudio.output(ctx, "sfx"),
+	sounding: on => tavernStageAudio.duck("sfx", on),
 	clock: { setTimeout: (fn, ms) => window.setTimeout(fn, ms), clearTimeout: id => window.clearTimeout(id) } });
 // 环境音 (castStage `ambience`): the state's loop for the place or weather on a second BGM transport (modules/stage-music.js) on the
 // same AudioContext, so it sounds alongside the BGM. Only the open stage plays it; it follows the state across pages and turns.
@@ -301,8 +303,14 @@ function useTavernStageReading() {
 	const channel = on ? speech.providers.find(item => item.id === speech.provider) : null;
 	return { on, prepares: Boolean(channel && channel.prepares) };
 }
-function tavernBeatSpeech(sessionId, beat) {
-	return beat.kind === "line" ? { sessionId: sessionId, speaker: beat.speaker, text: (beat.quotes || []).join(" ") || beat.text, emotion: beat.emotion }
+// What a line page's voice says (as dialogue-bubbles.js bubbleSpeech): its voice text, else its words unless the speaker's
+// 配音语言 is not 中文; '' says nothing. The stage, its backlog and the chat rows read the same rule.
+function tavernPageSpeech(page, data) {
+	const character = tavernCastCharacter(data && data.cast, page.speaker);
+	return page.voice !== undefined ? page.voice : voiceTranslates(character && character.voiceLanguage) ? "" : (page.quotes || []).join(" ") || page.text;
+}
+function tavernBeatSpeech(sessionId, beat, data) {
+	return beat.kind === "line" ? { sessionId: sessionId, speaker: beat.speaker, text: tavernPageSpeech(beat, data), emotion: beat.emotion }
 		: { sessionId: sessionId, text: beat.text, narration: true };
 }
 
@@ -340,14 +348,23 @@ function TavernStageScreen(props) {
 	// resolves to (stage-skin-choice.js, castStage `skin`); 经典 until it arrives.
 	// A pack skin's art layer draws from its bundle (castStage `skin.base`) once its images have loaded.
 	const skinDocument = data && data.skin && data.skin.document || BUILTIN_STAGE_SKINS.classic;
-	const skin = React.useMemo(() => stageSkinRoot(skinDocument), [JSON.stringify(skinDocument)]);
+	// Its font roles resolve against the font library (features/font-library.js) once that is listed.
+	const fontLibrary = useTavernFontLibrary();
+	const skin = React.useMemo(() => stageSkinRoot(skinDocument, fontLibrary), [JSON.stringify(skinDocument), fontLibrary]);
 	const artFiles = useStageSkinArtFiles(data && data.skin && data.skin.document ? data.skin : null);
 	const art = React.useMemo(() => stageSkinArt(skinDocument, artFiles), [skinDocument === BUILTIN_STAGE_SKINS.classic ? "" : JSON.stringify(skinDocument), artFiles]);
 	const icons = React.useMemo(() => stageSkinControlIcons(skinDocument, artFiles), [skinDocument, artFiles]);
+	useStageSkinFonts(data && data.skin && data.skin.document ? data.skin : null, skinDocument, fontLibrary);
+	// 避让 (stage-audio.js): the skin may set how far a voice or a sound effect lowers the layers below it; the engine's amounts
+	// return when the stage closes.
+	const duckBy = JSON.stringify(skinDocument.duck || null);
+	React.useEffect(() => { tavernStageAudio.duckBy(JSON.parse(duckBy)); return () => tavernStageAudio.duckBy(null); }, [duckBy]);
 	// 入场演出 (stage-entrance.js) plays over the stage as it opens; the stage is drawn under it all along.
 	const entrance = useTavernStageEntrance(data && data.entrance, Boolean(data));
-	const sceneRef = React.useRef(null), readingOn = React.useRef(reading.on), skinRef = React.useRef(skinDocument);
+	const sceneRef = React.useRef(null), readingOn = React.useRef(reading.on), skinRef = React.useRef(skinDocument), dataRef = React.useRef(null);
 	readingOn.current = reading.on; skinRef.current = skinDocument;
+	// Whose 配音语言 decides what a page says (tavernPageSpeech): as the stage last read it.
+	dataRef.current = data;
 	// A channel that can ready its voices (Fish /v1/warm, when its service offers it) is asked once as the stage opens.
 	React.useEffect(() => { if (reading.prepares) rpc("speechPrepare", {}, id).catch(() => {}); }, [id, reading.prepares]);
 	// While a line is read aloud (from its request until it ends or is stopped); a newer reading owns the flag.
@@ -420,7 +437,7 @@ function TavernStageScreen(props) {
 		nextCard: () => { const now = shownRef.current; if (!now.last) showCard(now.card + 1); },
 		speech: { on: () => readingOn.current, progress: () => tavernSpeech.progress(), stop: () => { spoken.current++; setSpeaking(false); tavernSpeech.stop(); },
 			speak: beat => {
-				const mine = ++spoken.current, done = tavernSpeech.speak(tavernBeatSpeech(id, beat));
+				const mine = ++spoken.current, done = tavernSpeech.speak(tavernBeatSpeech(id, beat, dataRef.current));
 				setSpeaking(true);
 				Promise.resolve(done).finally(() => { if (spoken.current === mine) setSpeaking(false); });
 				return done;
@@ -593,7 +610,7 @@ function TavernStageScreen(props) {
 			visit: cardKey, typed, textSpeed: prefs.textSpeed, reveal, narrationLines: narration && narration.lines, onTyped: () => setTypedVisit(cardKey), textRef: pager.textRef, card: cards[card].text, more: !lastCard }),
 		docked ? null : input,
 		config ? h(TavernStageConfigScreen, { tab: config.tab, onClose: closeConfig,
-			tests: { voice: reading.on && beats[reader.index] ? () => tavernSpeech.speak(tavernBeatSpeech(id, beats[reader.index])) : null } }) : null,
+			tests: { voice: reading.on && beats[reader.index] ? () => tavernSpeech.speak(tavernBeatSpeech(id, beats[reader.index], data)) : null } }) : null,
 		backlog ? h(TavernStageBacklog, { sessionId: id, data, page: reader.index, onJump: jumpBack, onClose: closeBacklog }) : null,
 		entrance.element);
 }

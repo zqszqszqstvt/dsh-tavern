@@ -1,16 +1,18 @@
 import { dialogueQuotes } from './cast-annotation.js'
-import { parseDialogueBubbles } from './dialogue-bubbles.js'
-import { STAGE_SCREEN_EFFECTS } from './stage-effects.js'
+import { bubbleEmotion, bubbleSpeaker } from './dialogue-bubbles.js'
+import { parseBubbles } from '../../src/client/bubble-line.cjs'
+import directorCommands from '../../packages/dsh-presentation-protocol/src/director-commands.cjs'
+const STAGE_SCREEN_EFFECTS = directorCommands.byName['screen.play'].schema({}).properties.effect.enum
 
-// Host-owned pages: one per non-empty row. A dialogue bubble row is its speaker's line; an earlier turn's annotations
-// decorate a row, but cannot change its address.
+// Host-owned pages: one per non-empty row. A dialogue bubble row is its speaker's line (with its voice text when it has
+// one); an earlier turn's annotations decorate a row, but cannot change its address.
 export function stagePages(text, lines = []) {
   let cursor = 0
   if (/^\s*(```|~~~)/m.test(text)) lines = []
-  return text.split('\n').map(row => row.trim()).filter(Boolean).map(row => parseDialogueBubbles(row)[0]).filter(Boolean).map((row, index) => {
+  return text.split('\n').map(row => row.trim()).filter(Boolean).map(row => parseBubbles(row)[0]).filter(Boolean).map((row, index) => {
     if (row.kind === 'bubble') {
       const text = row.thought ? '（' + row.text + '）' : row.text
-      return { at: index + 1, text, kind: 'line', speaker: row.speaker, emotion: row.emotion, quotes: [row.text] }
+      return { at: index + 1, text, kind: 'line', speaker: bubbleSpeaker(row), emotion: bubbleEmotion(row.mood), quotes: [row.text], ...(row.voiced ? { voice: row.speech } : {}) }
     }
     const text = row.text
     let speaker

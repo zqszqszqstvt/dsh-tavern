@@ -1,6 +1,5 @@
 import { createLedgerItem } from './background-pipeline.js'
-import { LEDGER_RULES, LEDGER_SUBMIT_TOOL, createLedgerSubmission, readLedger } from './story-ledger.js'
-import { pickLedgerEntities, focusedLedgerContext, assertLedgerFocus, LEDGER_LOOKUP_TOOL, lookupLedgerEntities } from './ledger-focus.js'
+import { LEDGER_RULES, LEDGER_SUBMIT_TOOL, applyLedgerDelta, createLedgerSubmission, ledgerContext, readLedger } from './story-ledger.js'
 
 // One request reads at most this much story text; longer backlogs continue on the next click.
 export const LEDGER_BATCH_CHARS = 40000
@@ -13,7 +12,6 @@ function str(value) {
 export function ledgerBacklog(chat, limit = LEDGER_BATCH_CHARS) {
   const from = Math.max(0, Number(readLedger(chat.ledger).consolidatedTurn) || 0)
   const turns = new Map()
-  const facts = new Map()
   for (const message of chat.messages || []) {
     if (message?.role !== 'user' && message?.role !== 'assistant') continue
     const turn = Number(message.turn) || 0
@@ -22,7 +20,6 @@ export function ledgerBacklog(chat, limit = LEDGER_BATCH_CHARS) {
     if (!text) continue
     if (!turns.has(turn)) turns.set(turn, [])
     turns.get(turn).push((message.role === 'user' ? '[玩家]\n' : '[正文]\n') + text)
-    if (message.role === 'assistant') facts.set(turn, [...(facts.get(turn) || []), text])
   }
   const ordered = [...turns.keys()].sort((a, b) => a - b)
   const included = []
@@ -38,8 +35,7 @@ export function ledgerBacklog(chat, limit = LEDGER_BATCH_CHARS) {
     from,
     through: included.length ? included[included.length - 1].turn : from,
     remaining: ordered.length - included.length,
-    text: included.map(item => item.block).join('\n\n'),
-    evidenceText: included.flatMap(item => facts.get(item.turn) || []).join('\n\n')
+    text: included.map(item => item.block).join('\n\n')
   }
 }
 
@@ -52,7 +48,7 @@ const LEDGER_ITEM = createLedgerItem({ rules: MANUAL_RULES })
  * a consolidation the next story turn reads it once (see ledgerFrameInputs), so the
  * story sees fresh facts without carrying the ledger in every request.
  */
-export function createManualLedger({ store, runAgent, selection, beginTask, ensureSession = async () => {}, onError = error => console.error('台账整理保存状态失败', error) }) {
+export function createManualLedger({ store, runAgent, selection, beginTask, ensureSession = async () => {}, replaceLedger = async () => null, onError = error => console.error('台账整理保存状态失败', error) }) {
   const jobs = new Map()
   function project(chat) {
     const state = chat.ledgerTask || { status: 'idle' }
@@ -91,38 +87,35 @@ export function createManualLedger({ store, runAgent, selection, beginTask, ensu
   }
   async function execute(chat, backlog, model, sessionId, taskRun) {
     let result
+    const submission = createLedgerSubmission({ enabled: true, current: chat.ledger, turn: backlog.through })
     try {
-      let focus = pickLedgerEntities(chat.ledger, backlog.text)
-      const submission = createLedgerSubmission({ enabled: true, current: chat.ledger, turn: backlog.through })
-      await ensureSession(sessionId)
-      result = await runAgent({
-        task: 'ledger', persistent: true,
-        persistentSessionId: taskRun.participantRequest.sessionId,
-        rewindTo: taskRun.participantRequest.rewindTo,
-        rewindFormatVersion: taskRun.participantRequest.formatVersion,
-        onPersistentSessionReady: id => taskRun.bindSession(id), sessionId, chatId: chat.id, selection: model,
-        backgroundTasks: { variables: false, posture: false, characterDesign: false },
-        system: LEDGER_ITEM.system({ from: backlog.from + 1, through: backlog.through }),
-        messages: [{ role: 'user', content: [{ type: 'text', text: focusedLedgerContext(chat.ledger, focus) + '\n\n【待整理剧情】\n' + backlog.text }] }],
-        tools: [LEDGER_SUBMIT_TOOL, LEDGER_LOOKUP_TOOL],
-        maxToolCalls: 8,
-        temperature: 0.2,
-        stopToolsWhen: () => submission.result !== null,
-        acceptWithoutText: () => submission.result !== null,
-        onToolCall: async call => {
-          if (call?.name === LEDGER_LOOKUP_TOOL.name) {
-            try {
-              focus = lookupLedgerEntities(chat.ledger, focus, call.arguments, backlog.text, backlog.evidenceText)
-              return JSON.stringify({ ok: true, context: focusedLedgerContext(chat.ledger, focus) })
-            } catch (error) { return JSON.stringify({ ok: false, retryable: true, error: error.message }) }
-          }
-          if (call?.name !== LEDGER_SUBMIT_TOOL.name) return JSON.stringify({ ok: false, retryable: true, error: '本任务只允许调用 ledger_submit 或 ledger_lookup' })
-          if (submission.complete) return submission.execute(call)
-          try { assertLedgerFocus(chat.ledger, focus, call.arguments) }
-          catch (error) { return JSON.stringify({ ok: false, retryable: true, error: error.message }) }
-          return submission.execute(call)
-        }
-      })
+      // A plugin may take the consolidation over (tavern.replaceLedger); its delta goes
+      // through the same validation and commit, and Tavern's own run is the fallback.
+      const replaced = await replaceLedger({ gameId: sessionId, from: backlog.from + 1, through: backlog.through, text: backlog.text,
+        ledger: readLedger(chat.ledger), rules: MANUAL_RULES, tool: LEDGER_SUBMIT_TOOL,
+        apply: delta => applyLedgerDelta(chat.ledger, delta, backlog.through) })
+      if (replaced) submission.execute({ arguments: replaced.delta })
+      else {
+        await ensureSession(sessionId)
+        result = await runAgent({
+          task: 'ledger', persistent: true,
+          persistentSessionId: taskRun.participantRequest.sessionId,
+          rewindTo: taskRun.participantRequest.rewindTo,
+          rewindFormatVersion: taskRun.participantRequest.formatVersion,
+          onPersistentSessionReady: id => taskRun.bindSession(id), sessionId, chatId: chat.id, selection: model,
+          backgroundTasks: { variables: false, posture: false, characterDesign: false },
+          system: LEDGER_ITEM.system({ from: backlog.from + 1, through: backlog.through }),
+          messages: [{ role: 'user', content: [{ type: 'text', text: ledgerContext(chat.ledger) + '\n\n【待整理剧情】\n' + backlog.text }] }],
+          tools: [LEDGER_SUBMIT_TOOL],
+          maxToolCalls: 4,
+          temperature: 0.2,
+          stopToolsWhen: () => submission.result !== null,
+          acceptWithoutText: () => submission.result !== null,
+          onToolCall: async call => call?.name === LEDGER_SUBMIT_TOOL.name
+            ? submission.execute(call)
+            : JSON.stringify({ ok: false, retryable: true, error: '本任务只允许调用 ledger_submit' })
+        })
+      }
       if (submission.result === null) throw new Error('模型未调用 ledger_submit 提交台账，本次未保存。请重试；若持续出现，请检查后台模型是否支持工具调用。')
       const completed = await taskRun.commit({ participant: taskRun.participant(result), stateChanged: true, apply: current => {
         // A manual edit or another consolidation since this request started wins.
