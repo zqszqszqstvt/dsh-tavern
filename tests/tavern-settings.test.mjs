@@ -158,5 +158,22 @@ test('世界书模型筛选是本局开关，默认关闭', () => {
   assert.equal(normalizeBackgroundTasks({}).worldbookScreening, false)
   assert.equal(normalizePlayDefaults({}).backgroundTasks.worldbookScreening, false)
   const saved = patchConversationBackground({ backgroundTasks: { styleReference: true } }, { backgroundTasks: { worldbookScreening: true } })
-  assert.deepEqual([saved.backgroundTasks.worldbookScreening, saved.backgroundTasks.styleReference], [true, true])
+  assert.deepEqual([saved.backgroundTasks.worldbookScreening, saved.backgroundTasks.styleReference], [false, true])
+})
+
+test('新游戏统一主动检索，旧默认值归一化且严格校验', () => {
+  assert.equal(normalizePlayDefaults({}).worldbookStrategy, 'native-skills')
+  const saved = applyTavernSettingsPatch({}, { defaultPlaySettings: { worldbookStrategy: 'legacy' } })
+  assert.equal(presentTavernSettings(saved, {}).defaultPlaySettings.worldbookStrategy, 'native-skills')
+  const updated = applyTavernSettingsPatch(saved, { defaultPlaySettings: { playerName: '旅人' } })
+  assert.equal(updated.defaultPlaySettings.worldbookStrategy, 'native-skills')
+  assert.throws(() => applyTavernSettingsPatch({}, { defaultPlaySettings: { worldbookStrategy: 'unknown' } }), /默认世界书策略无效/)
+})
+
+
+test('变量结算不再是用户开关，旧默认和会话配置不阻止 MVU，内部任务掩码保留', () => {
+  assert.equal(normalizePlayDefaults({ backgroundTasks: { variables: false } }).backgroundTasks.variables, true)
+  assert.equal(patchConversationBackground({ backgroundTasks: { variables: false } }, { backgroundTasks: { variables: false } }).backgroundTasks.variables, true)
+  assert.equal(presentTavernSettings({ backgroundTasks: { variables: false } }, {}).backgroundTasks.variables, true)
+  assert.equal(normalizeBackgroundTasks({ variables: false }).variables, false)
 })

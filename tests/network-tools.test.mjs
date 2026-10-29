@@ -10,7 +10,7 @@ test('联网门禁实时读取会话，插件、原生搜索和网页读取共�
     capabilityFor: name => name === 'plugin_search' ? 'search' : undefined, settings: () => ({ fetchEnabled }) })
   const tools = ['web_search', 'web_fetch', 'plugin_search', 'local'].map(name => ({ name }))
   const names = async id => (await policy.filter(tools, { id })).map(t => t.name)
-  assert.deepEqual(await names('play'), ['web_search', 'plugin_search', 'local'])
+  assert.deepEqual(await names('play'), tools.map(t => t.name))
   fetchEnabled = true
   assert.deepEqual(await names('play'), tools.map(t => t.name))
   chat.webSearchEnabled = false
@@ -20,7 +20,7 @@ test('联网门禁实时读取会话，插件、原生搜索和网页读取共�
   assert.deepEqual(await names('card'), tools.map(t => t.name))
   chat.webSearchEnabled = true
   chat.disabledForegroundTools = ['plugin_search']
-  assert.match(await policy.denial('plugin_search', { id: 'play' }), /前台工具/)
+  assert.equal(await policy.denial('plugin_search', { id: 'play' }), undefined)
   assert.equal(await policy.denial('plugin_search', { id: 'background' }), undefined)
   backgroundEnabled = false
   assert.deepEqual(await names('background'), ['local'])
