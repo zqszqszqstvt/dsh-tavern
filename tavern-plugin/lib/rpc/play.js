@@ -93,13 +93,6 @@ export function createPlayHandlers(deps) {
     async getBackgroundOperation(args) {
       return { operation: await sessionOperation(args && args.sessionId, args && args.operationId) }
     },
-    async setStatusBarPlacement(args) {
-      if (!['sidebar', 'body'].includes(args?.placement)) throw new Error('无效的状态栏位置')
-      const chat = await chatForSession(args.sessionId)
-      if (!chat || !['story', 'script'].includes(chat.mode || 'story')) throw new Error('请先打开游玩会话')
-      await updateChat(chat.id, current => ({ ...current, statusBarPlacement: args.placement }), { source: 'ui.status-bar-placement' })
-      return { statusBarPlacement: args.placement }
-    },
     async setPlayerName(args) {
       return { playerName: await setPlayerName(args && args.sessionId, args && args.userName) }
     },
@@ -183,6 +176,9 @@ export function createPlayHandlers(deps) {
         .catch(error => console.warn('dsh-tavern: 精修记录保存失败', error))
       return { edits, view }
     },
+    async polishProgress(args) {
+      return { progress: polishReviewer.progress(str(args?.sessionId)) }
+    },
     async polishComparison(args) {
       return { comparison: await polishRecords.latest(str(args?.sessionId)), prereview: (await readTavernSettings()).polishPrereview === true }
     },
@@ -261,6 +257,9 @@ export function createPlayHandlers(deps) {
     },
     async getBackgroundProgress(args) {
       return { progress: backgroundAgentRunner.progress(args && args.sessionId) || pluginSettlementProgress.snapshot(args && args.sessionId) }
+    },
+    async getBackgroundRuns(args) {
+      return { runs: backgroundAgentRunner.runs(args && args.sessionId) }
     },
     async stopBackground(args) {
       return { view: await stopBackground(args && args.sessionId, args && args.operationId) }
